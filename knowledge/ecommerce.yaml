@@ -1,0 +1,252 @@
+# 电商经营分析 · 业务口径库（垂直版）
+#
+# 事实基础：UCI Online Retail 真实数据集
+#   文件：_data/Online Retail.xlsx
+#   规模：541,909 行 × 8 列
+#   期间：2010-12-01 08:26 ~ 2011-12-09 12:50（英国线上零售，B2B/B2C 混合，以批发小单为主）
+#   列名：InvoiceNo / StockCode / Description / Quantity / InvoiceDate / UnitPrice / CustomerID / Country
+#
+# 本文件中所有 note 里的数字，都是在这份数据集上实际跑 pandas 算出来的，
+# 不是行业经验值，也不是估计值。凡写「不可信」的地方，都给出了触发条件和实测依据。
+#
+# 字段说明（沿用项目 schema）：
+#   name       口径名称
+#   type       metric（指标）/ field（字段语义）/ rule（业务规则）
+#   aliases    别名，命中别名和命中名称同等重要
+#   definition 人话解释
+#   formula    计算方式（会原样注入给模型）
+#   requires   需要哪些字段：必须用数据集真实列名，否则适用性加分失效
+#   keywords   补充关键词，帮助词法检索（中英文都写）
+#   note       注意事项（每条都带实测数据依据）
+
+version: 1
+
+entries:
+
+  # ============================================================
+  # 一、指标类
+  # ============================================================
+
+  - name: 净销售额
+    type: metric
+    aliases: [净销售, 净额, 实际销售额, 实收金额, 净收入, 营业收入, net revenue, net sales]
+    definition: 全部行的 Quantity × UnitPrice 之和；C 开头的取消/退货发票以负数量负金额自动抵减，无需另建退款字段
+    formula: sum(Quantity * UnitPrice)，对全部行求和，不预先过滤
+    requires: [Quantity, UnitPrice]
+    keywords: [净, 销售额, 收入, 营收, 金额, 退货, 冲销, 扣减, revenue, sales]
+    note: 本数据集实测净销售额 = 9,747,747.93。正数量行贡献 +10,644,560.42，负数量行贡献 -896,812.49。注意负数量金额全部来自 C 发票，因此「不过滤直接求和」就等于净销售额；反过来，如果只过滤 Quantity > 0 再求和，得到的是毛销售额而不是净销售额 —— 这是本数据集最常见的算错。
+
+  - name: 销售额（毛额）
+    type: metric
+    aliases: [销售额, 毛销售额, 总销售额, 流水, 成交额, GMV, gross sales]
+    definition: 只统计 Quantity > 0 的行，不扣减退货和冲销
+    formula: sum(Quantity * UnitPrice) where Quantity > 0
+    requires: [Quantity, UnitPrice]
+    keywords: [毛, 总, 销售额, 流水, 成交, GMV, 不扣减, gross]
+    note: 本数据集实测毛销售额 = 10,644,560.42，比净销售额 9,747,747.93 高 9.2%。毛额与净额差额 896,812.49 全部是 C 发票冲销。用途上两者不能混：算退货率、算净收入用净额；算「卖出去多少货」用毛额。报告里必须写明用的是哪一个，否则同一句「销售额」可能相差近 90 万。
+
+  - name: 有效订单数
+    type: metric
+    aliases: [有效单量, 成交订单数, 有效订单量, 订单数, 单量, order count, orders]
+    definition: 排除 C 开头发票、且至少含一行 Quantity > 0 的发票张数，按 InvoiceNo 去重计数
+    formula: count(distinct InvoiceNo) where InvoiceNo 不以 C 开头 and Quantity > 0
+    requires: [InvoiceNo, Quantity]
+    keywords: [订单, 单量, 有效, 成交, 笔数, 发票, invoice, order]
+    note: 实测全部发票 25,900 张，其中 C 发票 3,836 张（14.81%），有效订单 20,728 张。两点必须提醒：①一行不等于一单，本数据集有 9,694 组「同一 InvoiceNo + 同一 StockCode」的重复行，同一订单拆成多行很常见，所以必须先按 InvoiceNo 去重再计数，直接数行数会把订单数放大到 54 万；②InvoiceNo 在数据集里是字符串而非数字，C 前缀判断必须先把该列转成字符串再做 startswith，否则数值列会直接报错或漏判。
+
+  - name: 客单价
+    type: metric
+    aliases: [客单, 平均订单金额, 平均客单价, 单均金额, AOV, average order value]
+    definition: 净销售额除以有效订单数，衡量单笔订单的平均贡献
+    formula: 净销售额 / 有效订单数
+    requires: [Quantity, UnitPrice, InvoiceNo]
+    keywords: [客单, 客单价, 平均, 每单, 单笔, 单价, AOV, average]
+    note: 实测客单价均值 513.54、中位数 298.87、P90 913.32。均值是中位数的 1.72 倍，说明分布被极端大单严重右偏：最大单笔 168,469.60，最小 -11,062.06（InvoiceNo A563186 的 1 行 StockCode=B、Description=Adjust bad debt 坏账调整）。因此报「客单价」时必须说明用的是均值还是中位数，只说 513.54 会让用户以为典型订单是 500 英镑，实际一半订单不到 300 英镑。样本内还有 2 笔负金额订单，若口径含 C 发票需单独说明。
+
+  - name: 复购率
+    type: metric
+    aliases: [复购, 回购, 留存率, 重复购买率, 老客占比, retention, repeat purchase rate, repurchase]
+    definition: 在可识别客户中，有效订单数 >= 2 的客户占比
+    formula: count(distinct CustomerID having count(distinct InvoiceNo) >= 2) / count(distinct CustomerID with 有效订单)
+    requires: [CustomerID, InvoiceNo, Quantity]
+    keywords: [复购, 回购, 留存, 重复, 老客, 再购, retention, repeat, repurchase]
+    note: 实测有效客户 4,339 人，其中 2,845 人有 2 张及以上有效订单，复购率 65.57%。**但这个数字的可信度受限于覆盖率**：CustomerID 缺失 135,080 行（24.927%），约四分之一的交易无法归属到任何客户，复购率只能覆盖 75.1% 的行。报告必须显式声明「本指标基于 75.1% 可识别客户，缺失 CustomerID 的 24.9% 交易未纳入」。另外分子口径会随「什么算一次购买」而变：按不同发票算 65.57%，按不同自然日算 64.30%，按不同月份算 62.32%，三者都不算错但必须写明，差异来自 697 位客户存在「同一天开多张发票」的情况。
+
+  - name: 退货率
+    type: metric
+    aliases: [退货, 退款率, 取消率, 冲销率, 退货占比, return rate, refund rate, cancellation rate]
+    definition: C 开头发票的行数（或金额）占全部交易的比例，用于衡量退款/取消规模
+    formula: ①行口径 = C 发票行数 / 全部行数；②金额口径 = C 发票金额绝对值 / 毛销售额
+    requires: [InvoiceNo, Quantity, UnitPrice]
+    keywords: [退货, 退款, 取消, 冲销, 退回, 退回率, return, refund, cancel, C]
+    note: 实测三套口径差异很大，选错会得出完全不同的结论：行口径 = 9,288 / 541,909 = 1.71%；金额口径 = 896,812.49 / 10,644,560.42 = 8.43%；发票口径 = 3,836 / 25,900 = 14.81%。原因是有大量低价行、退货集中在高价行。回答时禁止只说「退货率 1.7%」而不说口径。另需注意：C 发票 9,288 行全部是负数量（无一行为正或零），所以「C 发票」和「负数量」在这份数据里高度重叠但不完全等同 —— 负数量共 10,624 行，其中 1,336 行不是 C 发票（见「Quantity 为负的含义」条）。
+
+  - name: 客户留存（回访）
+    type: metric
+    aliases: [留存, 留存率, 回访率, 客户回访, 月度留存, 复购留存, retention rate, cohort retention]
+    definition: 上月有有效订单的客户中，本月仍有有效订单的比例
+    formula: count(上月客户 ∩ 本月客户) / count(上月客户)，按自然月滚动
+    requires: [CustomerID, InvoiceDate, InvoiceNo, Quantity]
+    keywords: [留存, 回访, 复购, 次月, 月度, 流失, 活跃, retention, cohort, churn]
+    note: 实测 2011 年逐月留存率在 31.21%~45.60% 之间，中位约 38%，可作为基准。**但最后一个月的留存率不可信**：2011-12 实测留存率仅 22.28%，这不是流失加剧，而是 2011-12 只有 8 个交易日（2011-12-09 数据就结束了），客户还没完成当月购买。任何以 2011-12 为「本月」的留存率都必须标注期间不完整或直接剔除。同样，2010-12 只有 20 个交易日（起于 12-01），作为基准月也偏小。
+
+  - name: 商品动销
+    type: metric
+    aliases: [动销, 动销率, 活跃SKU, 在售商品数, 有销量商品数, active SKU, SKU sell-through]
+    definition: 在观察期内至少产生一笔正数量销售的商品编码数量，占全部商品编码的比例
+    formula: count(distinct StockCode where Quantity > 0 and 观察期) / count(distinct StockCode)
+    requires: [StockCode, Quantity, InvoiceDate]
+    keywords: [动销, 动销率, SKU, 商品, 活跃, 在售, 编码, 上架, sku, product]
+    note: 实测全部商品编码 4,070 个，有正数量销售的 3,941 个，动销率 96.8% —— 这个数字高得可疑，原因是口径太宽：只要求「观察期内卖过一次」。若把要求提高到「至少出现在 2 张不同发票」，降到 3,788 个（96.12%）；要求「出现在 2 个不同月份」降到 3,700 个（93.88%）。**这不是商品管理健康的证据**，全年 541,909 行的数据里卖过一次几乎必然。另注意 StockCode 不是稳定的商品主键：650 个编码（16.42%）对应多个 Description，覆盖 113,465 行（20.94%），例如编码 20713 有 8 种描述（正常为 JUMBO BAG OWLS 673 行，其余是 "wrongly marked. 23343 in box"、"found" 等录入备注）。按商品聚合时若同时按 Description 分组，会被这些备注噪声拆散。
+
+  - name: 国家结构
+    type: metric
+    aliases: [国家分布, 市场结构, 地区结构, 海外占比, 出口占比, country mix, market mix, geographic]
+    definition: 按 Country 分组统计净销售额或行数占比，用于看市场集中度和海外业务结构
+    formula: group by Country 后 sum(Quantity * UnitPrice)，再除以总净销售额
+    requires: [Country, Quantity, UnitPrice]
+    keywords: [国家, 地区, 市场, 结构, 占比, 海外, 出口, 分布, country, market, region]
+    note: 实测 38 个国家/地区，United Kingdom 有 495,478 行占 91.43%，第二名 Germany 仅 9,495 行（1.75%）。**这意味着两个结论**：①UK 单一市场高度主导，任何「海外市场增长」的结论都建立在不到 9% 的样本上，波动极大；②做国家对比时，第 9 名之后的国家样本量已不足 100 行 —— 有 9 个国家 < 100 行，合计 358 行（沙特 10 行、巴林 19 行、捷克 30 行、巴西 32 行、立陶宛 35 行），这些国家的「国家排名」「增长率」没有统计意义，必须写样本量或直接归入 Other。另有 "Unspecified"（446 行）、"European Community"（61 行）不是真实国家，是分类占位符，做国家数统计时应排除。
+
+  # ============================================================
+  # 二、字段语义类
+  # ============================================================
+
+  - name: InvoiceNo 语义（C 前缀）
+    type: field
+    aliases: [发票号, 发票编号, 订单号, 单号, C开头, C前缀, invoice number, invoice no]
+    definition: 发票号；以字母 C 开头表示该发票是取消/退货/冲销单据，不是正常销售单
+    formula: 判断 str(InvoiceNo).startswith("C")
+    requires: [InvoiceNo]
+    keywords: [发票, 单号, 订单号, 取消, 退货, 冲销, C, invoice, cancel, credit]
+    note: 实测全表 25,900 张发票中 3,836 张是 C 发票（14.81%），对应 9,288 行（1.71%）。关键事实：**C 发票的 9,288 行全部是负 Quantity**，且没有任何一张 C 发票同时既含正数量行又含负数量行（0 张），所以 C 发票可以整张按退货处理，不需要做行级拆分。另外 InvoiceNo 列在 pandas 里读到的是 object（字符串）而非数值 —— 含有 C 开头值和 A563186/A563187 这类 A 前缀调整单，做数值运算前必须先转字符串判断前缀，否则 C 发票会被当作缺失或直接抛错。
+
+  - name: InvoiceNo 语义（A 前缀调整单）
+    type: field
+    aliases: [A开头, A前缀, 调整单, 坏账单, 调整发票, adjustment invoice, bad debt]
+    definition: 以 A 开头的发票是系统调整/坏账单，不是真实销售，且内含正负对冲记录
+    formula: 过滤 str(InvoiceNo).startswith("A") 后逐行核对，不可整单按同一方向处理
+    requires: [InvoiceNo, StockCode, Quantity, UnitPrice]
+    keywords: [调整, 坏账, 手工, A, 对冲, 冲销, adjustment, bad debt]
+    note: 实测 A 前缀发票只有 3 张，全部是 2011-08-12 14:50~14:52 的 StockCode = B、Description = "Adjust bad debt" 坏账记录：A563185 为 +11,062.06，A563186 和 A563187 各为 -11,062.06。**关键提醒：这三行是互为反转的对冲记录，净额恰好为 -11,062.06，既不是 -22,124.12 也不是 0。** 做销售额时它们是真实的口径调整（保留即可），但做商品排名、SKU 动销、国家结构时必须排除 —— 否则 StockCode = "B" 会作为一个「商品」进入榜单，并让 United Kingdom 凭空多出两笔大额。另外它们的三行时间戳只差 1~2 分钟，说明是人工修正操作而非业务交易。
+
+  - name: Quantity 语义（负数含义）
+    type: field
+    aliases: [数量, 件数, 销量, 负数量, 负数, 退货数量, quantity, qty]
+    definition: 交易行数量；正数为销售，负数为退货/冲销或免费调整
+    formula: 负数行必须区分「C 发票退货」与「非 C 发票的零价调整」两种
+    requires: [Quantity, InvoiceNo, UnitPrice]
+    keywords: [数量, 件数, 销量, 负数, 负数量, 退货, 冲销, 调整, quantity, qty, negative]
+    note: 实测负数量共 10,624 行（1.96%，即用户所述 2.0%）。拆开看是两类，处理方式完全不同：①9,288 行是 C 开头发票，是真退货，带真实单价、产生负金额，计入退款冲销；②其余 1,336 行（占负数量行的 12.58%）**不是 C 发票，且这 1,336 行的 UnitPrice 全部为 0**，即金额影响为 0，本质是库存/损耗手工调整而非退货（对应 Description 里的 "damages"、"damaged"、"found"、"check"、"adjustment"）。**结论：只有 C 发票的负数量影响销售额，非 C 负数量行不影响收入但会拉低「总销量」。** 若用 sum(Quantity) 统计销量，会把 1,336 行无效负数量算进去，导致销量偏低；正确做法是分别处理或明确说明。
+
+  - name: UnitPrice 语义（<= 0 含义）
+    type: field
+    aliases: [单价, 价格, 售价, 零价, 免费, 赠品, 价格为0, unit price, price]
+    definition: 商品单价；等于 0 表示赠品、样品、损坏/盘亏调整等无金额行；小于 0 是坏账调整
+    formula: UnitPrice == 0 需单独标注；UnitPrice < 0 单独处理
+    requires: [UnitPrice, StockCode, Description]
+    keywords: [单价, 价格, 售价, 零价, 0, 免费, 赠品, 样品, 负价, price, zero]
+    note: 实测 UnitPrice <= 0 共 2,517 行（0.464%，即用户所述 2,517 行）。其中 2,515 行是单价正好为 0，另外 2 行是负单价，都来自坏账调整：InvoiceNo = A563186 / A563187、StockCode = B、Description = "Adjust bad debt"、UnitPrice = -11,062.06。**这组行不是商品交易，做商品分析时必须排除**。它实际是三条互为反转的记录：A563185 为 +11,062.06，A563186 与 A563187 各为 -11,062.06，三行净额恰为 -11,062.06，所以切勿以为它是 -22,124.12 或 0。零单价行的构成：正数量 1,179 行（赠品/样品）、负数量 1,336 行（调整）；Description 里最常见的是空值 1,454 行、check 159 行、damages/damaged 88 行、adjustment 16 行；涉及 1,419 个不同 StockCode、2,155 张发票，且 2,475 / 2,515 行（98.4%）的 CustomerID 为空。**影响：零单价行贡献的金额恒为 0，所以对销售额无影响，但会污染「单价」类统计，求平均单价时必须过滤 UnitPrice > 0**，否则 2,515 个 0 会把均价拉低。
+
+  - name: CustomerID 语义（缺失影响）
+    type: field
+    aliases: [客户ID, 客户编号, 用户ID, 会员ID, 客户标识, customer id, customer]
+    definition: 客户标识；为空表示该笔交易无客户归属，常见于匿名零售、POS 收银、以及手工调整行
+    formula: CustomerID 非空才可用于客户维度分析
+    requires: [CustomerID]
+    keywords: [客户, 用户, 会员, ID, 缺失, 为空, 匿名, 覆盖率, customer, missing]
+    note: 实测 CustomerID 缺失 135,080 行，占 541,909 行的 24.927%（即用户所述 24.9%），涉及 3,710 张不同发票；可识别的非空客户 4,372 个。缺失不是均匀的：**United Kingdom 的缺失率高达 27.0%，而 Germany / Spain / Netherlands / Belgium 的缺失率是 0.0%，France 仅 0.8%，EIRE 8.7%** —— 说明缺失主要来自英国本地的匿名零售/收银单，海外订单几乎都带客户号。这带来一个很强的误导：如果直接对「有 CustomerID 的行」做国家结构分析，会系统性低估 UK 占比、高估海外占比。另按数量看，缺失行只占全部绝对数量的 11.21%（689,008 / 6,145,512），按金额看占净销售额 1,447,682.12（约 14.9%），说明缺失行以中小额零售为主。
+
+  - name: InvoiceDate 语义
+    type: field
+    aliases: [发票时间, 发票日期, 交易时间, 时间, 日期, 下单时间, invoice date, transaction date]
+    definition: 发票（交易）发生的时间戳，精确到分钟；是本数据集唯一的时间字段
+    formula: 按 InvoiceDate 的月/日/小时做时间聚合
+    requires: [InvoiceDate]
+    keywords: [时间, 日期, 发票时间, 下单, 月, 日, 小时, 趋势, 同比, 环比, date, time, trend]
+    note: 实测取值范围 2010-12-01 08:26:00 ~ 2011-12-09 12:50:00，全部 541,909 行无缺失。三个必须传达的点：①**这是发票开具时间，不是用户下单时间**；数据集没有下单时间字段，所以任何「下单→支付转化」「购物车停留」类口径都无法计算，不要用 InvoiceDate 冒充。②粒度是分钟，且小时范围严格落在 06:00~20:59（无一行早于 6 点或晚于 20 点），说明这是人工开单/营业时段的时间戳，不是 24 小时线上的自动埋点。③同一张发票的所有行共享同一时间戳，实测 0 张发票跨越多个自然日、0 张跨越多个国家、0 张跨越多个 CustomerID —— 所以发票可以安全地当作「同一时刻同一客户同一市场」的分析单元。
+
+  - name: StockCode 语义
+    type: field
+    aliases: [商品编码, 商品编号, 货号, SKU, 商品代码, stock code, sku]
+    definition: 商品编码；大部分是 5 位数字，也包含字母后缀变体和 POST/DOT/M 等非商品特殊码
+    formula: 过滤商品分析时应排除非商品特殊码
+    requires: [StockCode, Description]
+    keywords: [商品, 编码, 货号, SKU, 代码, 特殊码, 邮费, 调整, stockcode, product]
+    note: 实测 4,070 个不同编码，10.126% 的行（54,873 行）编码里含字母。**里面混着非商品行为，做商品/品类分析前必须排除**：POST（邮费，1,256 行、+66,230.64）、DOT（Dotcom 邮费，710 行、+206,245.48）、C2（Carriage 运费，144 行、+6,986.00）三项邮费类合计 +279,462.12；M（Manual 手工调整，571 行、-68,674.19）、AMAZONFEE（平台费，34 行、-221,520.50）、BANK CHARGES（银行手续费，37 行、-7,175.64）、CRUK（佣金，16 行、-7,933.43）、D（Discount 折扣，77 行、-5,696.22）、S（Samples 样品，63 行、-3,049.39）、B（坏账，3 行、净 -11,062.06）为费用/调整类。完全不含数字的编码共 2,796 行。剩余金额最大的 AMAZONFEE 单项 -221,520.50 已相当于净销售额的 2.3%，混入商品排名会造成严重失真。
+
+  - name: 成本字段缺失
+    type: field
+    aliases: [成本, 进货价, 采购成本, 成本价, 毛利, 毛利率, 利润, cost, COGS, margin]
+    definition: 本数据集没有成本/进价字段，因此毛利、毛利率、利润率类指标无法计算
+    formula: 不可计算 —— 缺少成本字段
+    requires: [UnitPrice]
+    keywords: [成本, 毛利, 毛利率, 利润, 利润率, 赚, 亏, 盈亏, cost, margin, profit]
+    note: 数据集只有价格（UnitPrice）没有成本（无 Cost / 进价 / 采购价 列），**因此严禁输出毛利率、毛利润、利润率、盈亏等任何涉及成本的指标**。若用户问「毛利率是多少」，正确应答是明确说明缺少成本字段、本数据集无法计算，而不是用 UnitPrice 或 Quantity 凑一个比值（例如把「单价 × 数量」当利润）。项目口径库的注入提示也要求：字段不存在时要指出缺哪个字段，不要用相近字段凑数。可替代的口径是基于销售额的结构分析（占比、排名、趋势），这些不受成本缺失影响。
+
+  # ============================================================
+  # 三、规则类
+  # ============================================================
+
+  - name: 退货口径
+    type: rule
+    aliases: [退货规则, 退款口径, 冲销口径, 负数量处理, C发票处理, return policy]
+    definition: 退货 = InvoiceNo 以 C 开头的发票；非 C 发票的负数量行是零金额调整，不计入退货金额
+    formula: 退货行 = str(InvoiceNo).startswith("C")；退货数量 = abs(sum(Quantity)) where C；退货金额 = abs(sum(Quantity * UnitPrice)) where C
+    requires: [InvoiceNo, Quantity, UnitPrice]
+    keywords: [退货, 退款, 取消, 冲销, 负数量, C发票, 规则, return, refund, cancel]
+    note: 实测 C 发票 3,836 张、9,288 行、金额 -896,812.49（绝对值即退货金额），全部为负数量。**三条硬规则**：①做销售额时必须保留 C 发票（它们自带负号，天然完成扣减）；做「卖了多少货」时必须排除 C 发票。②非 C 发票的 1,336 行负数量单价全为 0，金额影响为 0，**不应计入退货金额**，否则会虚增退货行数 12.58%（10,624 vs 9,288）。③退货客户面很广：有 1,589 位可识别客户发生过退货，占有效客户 4,339 人的 36.62%，且其中仅 33 位是「只有退货没有正常购买」的客户 —— 说明退货是成熟客户的常态行为，不宜直接当作异常指标。另有 383 行 C 发票的 CustomerID 为空，无法归属客户。
+
+  - name: 期间可比性
+    type: rule
+    aliases: [期间完整, 可比期间, 数据完整性检查, 同比环比前提, 月度对比, period comparability]
+    definition: 做任何同比/环比/趋势对比前，必须先确认两端期间覆盖的自然日数一致，否则对比无效
+    formula: 对比前检查每期的实际有交易天数（count distinct date），不足则按日均归一化或直接剔除
+    requires: [InvoiceDate]
+    keywords: [期间, 同比, 环比, 对比, 趋势, 完整, 不完整, 日均, 归一化, period, compare, MoM, YoY]
+    note: "这是本数据集最大的坑，实测证据非常明确。按自然月统计，2011-11 净销售额 1,461,756.25，2011-12 只有 433,668.01，表面上是暴跌 70.3%；但实际有交易天数 2011-11 是 26 天、2011-12 只有 8 天（数据止于 2011-12-09 12:50，且 12-03 无交易）。按日均看：11 月 56,221.39/天 vs 12 月 54,208.50/天，**实际只差 3.6%，根本没有下滑**。所以规则是：①2011-12 永远不能作为完整期间参与月度对比，必须标注「期间不完整（仅 8 个交易日）」或按日均比较；②2010-12 也只有 20 个交易日（数据起于 2010-12-01），作为基准月同样偏小；③「月」不等于「可比期间」是本数据集最容易被误报的点，任何月度趋势结论都要先跑一遍有交易天数校验。"
+
+  - name: 客户维度覆盖率限制
+    type: rule
+    aliases: [客户分析前提, 覆盖率声明, 客户口径限制, 客户分析限制, customer coverage]
+    definition: 任何以 CustomerID 分组或筛选的分析，都只能覆盖约 75% 的交易，结论必须附带覆盖率声明
+    formula: 覆盖率 = count(CustomerID not null) / count(*) = 75.073%；按金额 = 85.15%
+    requires: [CustomerID]
+    keywords: [客户, 覆盖率, 声明, 缺失, 限制, 前提, 复购, 留存, 客户数, coverage, customer]
+    note: 实测 CustomerID 缺失 135,080 行 = 24.927%，即客户维度分析只能覆盖 75.073% 的行（按绝对数量口径覆盖 88.79%，按金额口径覆盖约 85.15% —— 即缺失行金额 1,447,682.12 / 净销售额 9,747,747.93 = 14.85%）。**强制要求：输出复购率、留存率、客户数、客户排名、客户分群等任何客户维度指标时，必须同时声明覆盖率和缺失行占比**，例如「基于 4,339 位可识别客户（覆盖 75.1% 的交易行，其余 24.9% 无客户归属）」。另外缺失是结构性偏斜的（UK 缺失 27.0%、海外基本 0%），所以客户维度结论不能直接推广到全部业务，尤其是 UK 本地零售部分被系统性排除在外。
+
+  - name: 国家对比样本量限制
+    type: rule
+    aliases: [国家对比前提, 小样本国家, 市场对比限制, 长尾国家, country sample size]
+    definition: 国家/市场对比时，样本量过小的国家不参与排名或增长率比较，需归入 Other 并声明
+    formula: 只看行数 >= 1000 的国家；< 100 行的国家必须合并或标注样本量
+    requires: [Country]
+    keywords: [国家, 市场, 样本量, 对比, 排名, 长尾, 小样本, country, sample, threshold]
+    note: 实测 38 个国家中，United Kingdom 占 91.43%（495,478 行），Germany 1.75%（9,495）、France 1.58%（8,557）、EIRE 1.51%（8,196）、Spain 0.47%（2,533）—— **前 5 名之后断崖式下跌**。行数 < 100 的国家有 9 个，合计仅 358 行（占 0.066%）：United Arab Emirates 68、European Community 61、RSA 58、Lebanon 45、Lithuania 35、Brazil 32、Czech Republic 30、Bahrain 19、Saudi Arabia 10。**建议阈值：行数 >= 1,000 的国家（共 11 个）才进入国家排名和同比分析；100~1,000 行只报绝对值不报增长率；< 100 行直接归入 Other。** 特别提醒 Saudi Arabia 只有 10 行、Bahrain 19 行，基于它们算出的「增长率」可以从 +500% 到 -90% 随意跳动，属于噪声。此外 "Unspecified"（446）和 "European Community"（61）是分类占位符不是国家，做国家数统计时应排除。
+
+  - name: 重复行与去重规则
+    type: rule
+    aliases: [重复数据, 去重, 重复行处理, 数据质量, duplicate rows, dedup]
+    definition: 数据集存在完全重复的行，做金额/数量聚合前需确认是否去重，两种口径结果不同
+    formula: df.duplicated().sum() 检测；去重后 9,726,006.95，未去重 9,747,747.93
+    requires: [InvoiceNo, StockCode, Quantity, UnitPrice, CustomerID]
+    keywords: [重复, 去重, 数据质量, 脏数据, 重复行, duplicate, dedup, quality]
+    note: 实测完全重复的行有 5,268 行（占 0.97%），涉及 10,147 行重复组。对净销售额的影响：不去重 9,747,747.93，去重后 9,726,006.95，**差额 21,740.98（0.22%）**；客单价中位数从 298.87 变成 302.56（+1.23%）。结论：影响量级很小，但**两种做法必须在报告里说明用的是哪一种**，不能让两次分析结果不同却都叫「净销售额」。不建议默认去重，因为同一发票同一商品确实可能分多行录入（真实业务场景），无法区分「重复录入」与「合法拆行」；建议保留原值并声明。
+
+  - name: 金额极端值处理
+    type: rule
+    aliases: [异常值, 离群值, 极端订单, 大单处理, 长尾, outlier, extreme value]
+    definition: 数据集存在极端大单和调整单，均值类指标必须同时给中位数，禁止只报均值
+    formula: 报告均值时同时报告中位数与分位数，或明确说明是否剔除极端值
+    requires: [Quantity, UnitPrice]
+    keywords: [异常, 离群, 极端, 大单, 长尾, 均值, 中位数, 分位, outlier, median]
+    note: 实测证据：订单金额均值 513.54 但中位数仅 298.87（均值/中位数 = 1.72），P90 为 913.32，最大值 168,469.60，最小值 -11,062.06。数量维度同样有极端值：单行最大 Quantity = 80,995（InvoiceNo 581483、StockCode 23843、PAPER CRAFT LITTLE BIRDIE、单价 2.08），而单行最小是 -80,995；Quantity > 1,000 的行 116 行，其中 > 10,000 的仅 3 行，<-1,000 的 58 行。**极其重要：这 3 行超大单和这条 -11,062.06 的坏账行（InvoiceNo A563186）就足以明显改变均值**，而 80,995 这一单几乎单独撑起了一天。规则：任何均值类指标必须并列中位数；做客户或商品排名时先剔除坏账单（InvoiceNo A563186 / A563187，StockCode = B）；不要用「剔除离群值」来美化结论，而要标注是哪些行造成的。
+
+  - name: InvoiceNo 幂等性
+    type: rule
+    aliases: [发票唯一性, 订单唯一性, 一张发票一个客户, 发票属性, invoice uniqueness]
+    definition: InvoiceNo 唯一确定一个时间点、一个客户和一个国家，可作为可靠的分析单元
+    formula: group by InvoiceNo 后 InvoiceDate/CustomerID/Country 各自 nunique 均为 1
+    requires: [InvoiceNo, InvoiceDate, CustomerID, Country]
+    keywords: [发票, 订单, 唯一, 幂等, 分组, 维度, invoice, unique, group]
+    note: 实测 25,900 张发票中：跨越多个国家的 0 张、跨越多个 CustomerID 的 0 张（在 CustomerID 非空范围内）、跨越多个自然日的 0 张。**因此可以放心按 InvoiceNo 分组做订单级分析**（订单金额、订单商品数、订单所在国家、订单日期），不会出现维度冲突。但要注意反向不成立：一行不等于一单，同一 InvoiceNo + StockCode 出现多行的组合有 9,694 组，所以「订单里的商品行数」不能当作「订单里的商品种类数」，需要用 count(distinct StockCode) 而不是 count(*)。

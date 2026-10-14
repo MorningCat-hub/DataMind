@@ -1,0 +1,139 @@
+# DataMind V4.7
+# Agent 评测用例集
+#
+# 判定原则：
+#
+#   只看 Agent **真实算出来的数值**，
+#   不让另一个模型去读报告打分。
+#
+#   因为「听起来对」和「算得对」是两件事，
+#   而我们要测的是后者。
+#   模型给一份自信的错误报告打高分，评测就没意义了。
+#
+# 期望字段：
+#
+#   numbers             必须出现在 execution_results 里的数值
+#   report_numbers      必须出现在报告正文里的数值
+#   tolerance           数值容差，默认 0.5
+#   status              期望的 execution_status
+#   require_tools       必须调用过的工具
+#   forbid_tools        不允许调用的工具
+#   knowledge           必须应用的业务口径名称
+#   min_charts          至少生成几张图
+#   must_mention        报告里必须出现的关键词
+#   must_mention_any    报告里至少出现其中一个
+
+version: 1
+
+cases:
+
+  # ==========================================
+  # 基础聚合
+  # ==========================================
+
+  - id: sum-total
+    dataset: sales_2026.csv
+    question: 所有订单的销售额合计是多少？请给出具体数字。
+    tags: [aggregate]
+    expect:
+      numbers: [175182]
+
+  - id: by-region
+    dataset: sales_2026.csv
+    question: 对比一下各地区的销售额，哪个地区最高？请给出各地区的具体数字，并画出对比图。
+    tags: [aggregate, chart]
+    expect:
+      numbers: [57368, 47115, 30218, 19081, 14031, 7369]
+      min_charts: 1
+
+  - id: row-count
+    dataset: sales_2026.csv
+    question: 一共有多少条订单记录？
+    tags: [aggregate]
+    expect:
+      numbers: [40]
+
+  - id: avg-sale
+    dataset: sales_2026.csv
+    question: 平均每笔订单的销售额是多少？
+    tags: [aggregate]
+    expect:
+      numbers: [4379.55]
+
+  - id: category-filter
+    dataset: sales_2026.csv
+    question: 电子产品这个品类的销售额合计是多少？
+    tags: [aggregate]
+    expect:
+      numbers: [24166]
+
+  # ==========================================
+  # 时间维度
+  # ==========================================
+
+  - id: quarterly
+    dataset: sales_2026.csv
+    question: 各季度的销售额分别是多少？
+    tags: [time]
+    expect:
+      numbers: [65573, 69619, 39990]
+
+  - id: monthly
+    dataset: sales_2026.csv
+    question: 每月的销售额分别是多少？
+    tags: [time]
+    expect:
+      numbers: [34879, 23276, 7418, 27379, 23817, 18423, 9485, 29344, 1161]
+
+  # ==========================================
+  # 业务口径（RAG）
+  # ==========================================
+
+  - id: net-sales
+    dataset: demo_orders.csv
+    question: 净销售额是多少？请给出具体数字。
+    tags: [knowledge]
+    expect:
+      numbers: [11350]
+      knowledge: [净销售额]
+
+  - id: aov
+    dataset: demo_orders.csv
+    question: 客单价是多少？
+    tags: [knowledge]
+    expect:
+      numbers: [1891.67]
+      knowledge: [客单价]
+
+  - id: net-by-region
+    dataset: demo_orders.csv
+    question: 各地区净销售额分别是多少？
+    tags: [knowledge]
+    expect:
+      numbers: [5200, 3450, 2700]
+      knowledge: [净销售额]
+
+  # ==========================================
+  # 工具使用
+  # ==========================================
+
+  - id: typed-tool-only
+    dataset: sales_2026.csv
+    question: 各地区的销售额分别是多少？请给出具体数字。
+    tags: [tools]
+    expect:
+      numbers: [57368, 47115, 30218, 19081, 14031, 7369]
+      forbid_tools: [run_python]
+
+  # ==========================================
+  # 健壮性
+  # ==========================================
+
+  - id: missing-field
+    dataset: demo_orders.csv
+    question: 成本合计是多少？
+    tags: [robustness]
+    expect:
+      status: success
+      must_mention: [成本]
+      must_mention_any: [不存在, 没有, 缺少, 未提供, 无法, 不含]

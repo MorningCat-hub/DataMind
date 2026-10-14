@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+pandas
+matplotlib
+openai
+langgraph
+typing-extensions
+
+# V4.1 多格式支持
+openpyxl
+python-docx
+xlrd
+Pillow
+PyYAML>=6.0
+pytest>=8.0

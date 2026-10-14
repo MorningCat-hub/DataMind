@@ -1,0 +1,100 @@
+# DataMind V4.6
+# 业务口径库
+#
+# 这个文件解决的是「同一句话，算法不一样」的问题。
+#
+# 模型只能看到列名和类型，它不知道：
+#   - 「净销售额」要扣掉退款和折扣
+#   - 「有效订单」要排除已取消
+# 于是它会拿一列名字相近的字段凑一个数 ——
+# 结果看起来很正常，但算的不是用户要的东西。
+#
+# 字段说明：
+#   name       口径名称（模型和用户都会用到）
+#   type       metric（指标）/ field（字段语义）/ rule（业务规则）
+#   aliases    别名，命中别名和命中名称同等重要
+#   definition 人话解释
+#   formula    计算方式（会原样注入给模型）
+#   requires   需要哪些字段
+#   keywords    补充关键词，帮助词法检索
+#   note       注意事项
+
+version: 1
+
+entries:
+
+  - name: 净销售额
+    type: metric
+    aliases: [净销售, 净额, 实际销售额, 实收金额, 净收入]
+    definition: 销售额扣除退款金额和折扣金额之后的实际收入
+    formula: 销售额 - 退款金额 - 折扣金额
+    requires: [销售额, 退款金额, 折扣金额]
+    keywords: [净, 退款, 折扣, 实收, 扣减, 减免]
+    note: 只统计订单状态为「已完成」的订单，不含已取消
+
+  - name: 有效订单
+    type: metric
+    aliases: [有效单量, 成交订单数, 有效订单数, 有效订单量]
+    definition: 订单状态为「已完成」的订单
+    formula: 筛选 订单状态 = 已完成 之后计数
+    requires: [订单状态, 订单号]
+    keywords: [有效, 成交, 完成, 取消]
+    note: 已取消和已退款的订单不计入
+
+  - name: 客单价
+    type: metric
+    aliases: [平均订单金额, 平均客单价, AOV]
+    definition: 净销售额除以有效订单数，衡量单笔订单的平均贡献
+    formula: 净销售额 / 有效订单数
+    requires: [销售额, 退款金额, 折扣金额, 订单状态]
+    keywords: [客单, 平均, 每单, 单笔]
+    note: 分子用净销售额，不要用销售额原值
+
+  - name: 毛利率
+    type: metric
+    aliases: [毛利, 利润率, 毛利率]
+    definition: 毛利润占净销售额的比例
+    formula: (净销售额 - 成本) / 净销售额
+    requires: [销售额, 退款金额, 折扣金额, 成本]
+    keywords: [毛利, 利润, 率, 成本]
+    note: 分母用净销售额
+
+  - name: 订单状态口径
+    type: rule
+    aliases: [有效状态, 完成口径, 订单有效性]
+    definition: 已完成、已发货 计入有效销售；已取消、已退款 不计入
+    requires: [订单状态]
+    keywords: [状态, 取消, 退款, 完成, 发货]
+    note: 做任何销售额统计前，先确认是否要排除已取消订单
+
+  - name: 地区划分
+    type: field
+    aliases: [大区, 区域, 销售区域]
+    definition: 华东=上海/江苏/浙江/安徽；华南=广东/广西/福建/海南；华北=北京/天津/河北/山西
+    requires: [地区]
+    keywords: [华东, 华南, 华北, 大区, 区域]
+    note: 数据集里地区已经是汇总好的大区，不需要再映射
+
+  - name: 订单日期
+    type: field
+    aliases: [下单时间, 下单日期, 日期]
+    definition: 下单日期，格式 YYYY-MM-DD
+    requires: [订单日期]
+    keywords: [日期, 时间, 月, 季度, 趋势]
+    note: 按自然月统计，不涉及财年转换
+
+  - name: 退款金额
+    type: field
+    aliases: [退款, 退货金额]
+    definition: 该订单已退还的金额
+    requires: [退款金额]
+    keywords: [退款, 退货]
+    note: 存的是正数，计算净销售额时直接相减
+
+  - name: 折扣金额
+    type: field
+    aliases: [折扣, 优惠金额, 优惠]
+    definition: 该订单给予的优惠金额
+    requires: [折扣金额]
+    keywords: [折扣, 优惠, 减免]
+    note: 存的是正数，计算净销售额时直接相减
